@@ -1,67 +1,133 @@
--- Function to roll a dice
+-- Initialize game state
+local GameMode = "Not-Started"
+local StateChangeTime = os.time()
+
+-- Player management
+local Waiting = {} -- Players waiting to join the next game
+local Players = {} -- Active players and their game states
+
+-- Token operations
+local PaymentToken = "ADDR"  -- Token address
+local UNIT = 1000
+local PaymentQty = tostring(math.floor(UNIT))    -- Quantity of tokens for registration
+local BonusQty = tostring(math.floor(UNIT))        -- Bonus token quantity for winners
+
+-- Handlers
+local Handlers = {} -- Assume Handlers is a module with add and utils functions
+
+-- Function to simulate a dice roll
 local function rollDice()
-    return math.random(1, 6)  -- Assuming a standard six-sided dice
+    return math.random(1, 6)
 end
 
--- Function to calculate the mean of a table of numbers
-local function calculateMean(numbers)
-    local sum = 0
-    for _, num in ipairs(numbers) do
-        sum = sum + num
-    end
-    return sum / #numbers
-end
-
--- Function to eliminate players with rolls less than the mean
-local function eliminatePlayers(players, mean)
-    local remainingPlayers = {}
-    for _, player in ipairs(players) do
-        if player.roll >= mean then
-            table.insert(remainingPlayers, player)
-        end
-    end
-    return remainingPlayers
-end
-
--- Function to play the game
-local function playGame(numPlayers)
-    math.randomseed(os.time())  -- Seed the random number generator
-
-    local players = {}
-    for i = 1, numPlayers do
-        table.insert(players, {id = i, roll = rollDice()})
+-- Function to simulate a round of the game
+local function playRound()
+    -- Reset players' results
+    for _, player in ipairs(Players) do
+        player.totalScore = 0
+        player.diceRolls = {}
     end
 
-    local winner = nil
-    while #players > 1 do
-        local rolls = {}
-        for _, player in ipairs(players) do
-            table.insert(rolls, player.roll)
-        end
-
-        local mean = calculateMean(rolls)
-        players = eliminatePlayers(players, mean)
-
-        if #players == 1 then
-            winner = players[1]
-        else
-            -- Reset rolls for the next round
-            for _, player in ipairs(players) do
-                player.roll = rollDice()
+    -- Roll dice for each player
+    for _, player in ipairs(Players) do
+        if not player.eliminated then
+            for i = 1, 5 do
+                local diceResult = rollDice()
+                if player.diceRolls[diceResult] then
+                    player.totalScore = player.totalScore + diceResult * player.diceRolls[diceResult]
+                else
+                    player.diceRolls[diceResult] = 1
+                    player.totalScore = player.totalScore + diceResult
+                end
             end
         end
     end
 
-    return winner
+    -- Calculate mean of total scores
+    local totalScoreSum = 0
+    local count = 0
+    for _, player in ipairs(Players) do
+        if not player.eliminated then
+            totalScoreSum = totalScoreSum + player.totalScore
+            count = count + 1
+        end
+    end
+    local mean = totalScoreSum / count
+    print("Mean of total scores:", mean)
+
+    -- Eliminate players whose total score is less than the mean
+    for _, player in ipairs(Players) do
+        if not player.eliminated and player.totalScore < mean then
+            player.eliminated = true
+            print("Player " .. player.id .. " eliminated with total score " .. player.totalScore)
+            -- Move eliminated player to waiting list
+            Waiting[player.id] = player
+            Players[player.id] = nil
+        end
+    end
 end
 
--- Main function
-local function main()
-    local numPlayers = 25  -- Change this to adjust the number of players
-    local winner = playGame(numPlayers)
-
-    print("Winner: Player " .. winner.id .. " with a roll of " .. winner.roll)
+-- Function to check if there's only one player left
+local function checkWinner()
+    local count = 0
+    local winner
+    for _, player in pairs(Players) do
+        if not player.eliminated then
+            count = count + 1
+            winner = player
+        end
+    end
+    return count == 1, winner
 end
 
--- Run the game
-main()
+-- Handler for cron messages, manages game state transitions
+Handlers.add(
+    "Game-State-Timers",
+    function(Msg)
+        return "continue"
+    end,
+    function(Msg)
+        local Now = os.time()
+        if GameMode == "Not-Started" then
+            GameMode = "Waiting"
+            StateChangeTime = Now + (2 * 60) -- 2 minutes
+            print("Starting Waiting Period")
+        elseif GameMode == "Waiting" then
+            if Now > StateChangeTime then
+                if next(Players) == nil then
+                    -- Not enough players, restart waiting period
+                    print("Not enough players registered! Restarting...")
+                    for _, player in pairs(Waiting) do
+                        -- Refund tokens
+                        print("Refunding tokens to player " .. player.id)
+                        -- This is where you would call sendReward function
+                    end
+                    Waiting = {}
+                    StateChangeTime = Now + (2 * 60) -- Restart waiting period
+                else
+                    -- Enough players, start the game
+                    GameMode = "Playing"
+                    StateChangeTime = Now + (25 * 60) -- 25 minutes
+                    print("Starting Game")
+                end
+            end
+        elseif GameMode == "Playing" then
+            playRound()
+            local hasWinner, winner = checkWinner()
+            if hasWinner then
+                print("Player " .. winner.id .. " wins the game with total score " .. winner.totalScore)
+                -- Handle reward for winner
+                print("Sending reward to player " .. winner.id)
+                -- This is where you would call sendReward function
+                -- Reset game state
+                GameMode = "Not-Started"
+                StateChangeTime = Now
+                Waiting = {}
+                Players = {}
+            end
+        end
+    end
+)
+
+-- Run the game state timer
+Handlers.add("Game-State-Timers", nil, nil)
